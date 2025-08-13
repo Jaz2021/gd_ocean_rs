@@ -1,0 +1,14 @@
+[gd_scene load_steps=2 format=3 uid="uid://dbxnk1u7pkyfc"]
+
+[ext_resource type="Script" uid="uid://b2b3nywunucjn" path="res://addons/oceanfft/components/QuadTree.cs" id="1_wwjy8"]
+
+[node name="QuadTree" type="Node3D"]
+script = ExtResource("1_wwjy8")
+metadata/_custom_type_script = "uid://b2b3nywunucjn"
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+visible = false
+
+[node name="VisibleOnScreenNotifier3D" type="VisibleOnScreenNotifier3D" parent="."]
+
+[node name="SubQuads" type="Node3D" parent="."]

@@ -1,0 +1,225 @@
+// @icon("res://Ocean/addons/oceanfft/icons/OceanEnvironment.svg")
+using System;
+using System.Collections.Generic;
+using Godot;
+[Icon("res://Ocean/addons/oceanfft/icons/OceanEnvironment.svg")]
+// [GlobalClass]
+public partial class OceanEnvironmentCS : Node3D
+{
+    // Manages environment settings, including above water/under water transitions
+    // for a scene containing an Ocean3D.
+    // The ocean simulation this environment is based on.
+    [Export] WorldEnvironment environment;
+    [Export] Ocean ocean;
+
+    // ## The environments sun light. This should be angled to align with to shine in
+    // ## the desired direction of the sunlight. Used above and under water.
+    [Export] DirectionalLight3D sunLight;
+
+    // ## The environments sky light. This should be pointed downwards (aligned to -Y).
+    // ## This is used under water to illuminate the environmental volumetric fog near
+    // ## the surface, and darker as depth increases. It is disabled above water, and
+    // ## the environments sky is used for sky lighting above water.
+    [Export] DirectionalLight3D skyLight;
+    [ExportGroup("Surfaced Environment Settings")]
+    // ## Color used for environments non-volumetric fog when above water.
+    [Export] Color surfacedFogColor = new(0.34901961684227f, 0.60784316062927f, 0.8901960849762f);
+    // ## Density used for environments non-volumetric fog when above water.
+    [Export] float surfacedFogDensity = 0.0001f;
+    // ## Sky Affect used for environments non-volumetric fog when above water.
+    [Export] float surfacedFogSkyEffect = 0.0f;
+    // ## Particle emitter for ambient wave splashes. Only emits particles when above
+    // ## water, disabled under water. Setting this is optional.
+    [Export] GpuParticles3D splashParticles;
+    // ## Particle sub emitter for making ambient wave splashes bigger. Only emits as
+    // ## secondary emission to splash_particles emissions. Setting this is optional.
+    [Export] GpuParticles3D splashSubParticles;
+    [ExportGroup("Underwater Environment Settings")]
+    // ## Color used for environments volumetric fog when under water.
+    [Export] Color underwaterFogColor = new(0.12549020349979f, 0.26274511218071f, 0.44705882668495f);
+    // ## Density used for environments volumetric fog when under water.
+    [Export] float underwaterFogDensity = 0.015f;
+    // ## Sky Affect used for environments volumetric fog when under water.
+    [Export] float underwaterFogSkyEffect = 1.0f;
+    // ## Particle emitter for underwater particles/bubbles. Only emits particles
+    // ## when under water, disabled above water. To disable this effect, simply do not
+    // ## set a particle emitter here.
+    [Export] GpuParticles3D underwaterParticles;
+    // ## Particle emitter for bubbles emitted when the camera first dives below the
+    // ## surface. To disable this effect, do not set a particle emitter here.
+    [Export] GpuParticles3D diveParticles;
+    // ## Canvas for displaying post processing effects, add another canvas layer to the scene,
+    // ## put its order below your UI canvas layer to render just the game elements with the effect.
+    [Export] ColorRect underwaterPostProc;
+    // ## True if the camera has transitioned to above water. False if the camera has
+    // ## transitioned to below water.
+
+    bool player_is_surfaced = false;
+    public float WaveMult {
+        get => ocean.WaveMult;
+        set
+        {
+            ocean.WaveMult = value;
+        }
+    }
+    public override void _Ready()
+    {
+        // Console.Log("Initializing Ocean Environment");
+        var camera = GetViewport().GetCamera3D();
+        Globals.instance.oceanEnvironment = this;
+        diveParticles.GetParent().RemoveChild(diveParticles);
+        camera.CallDeferred("add_child", diveParticles);
+
+        // if (ocean != null && !ocean.initialized)
+        // {
+        //     ocean.InitializeSimulation();
+        // }
+        if (splashParticles != null && Globals.instance.particlesEnabled)
+        {
+            if (splashParticles.ProcessMaterial is ShaderMaterial s)
+            {
+                s.SetShaderParameter("view_distance_max", camera.Far);
+                s.SetShaderParameter("wind_uv_offset", ocean.windUvOffset);
+                s.SetShaderParameter("cascade_uv_scales", ocean.cascadeScales);
+                s.SetShaderParameter("cascade_displacements", ocean.GetAllWavesTextures());
+                s.SetShaderParameter("uv_scale", ocean.uvScale);
+            }
+
+
+            if (splashSubParticles != null)
+            {
+                if (splashSubParticles.ProcessMaterial is ShaderMaterial sh)
+                {
+                    sh.SetShaderParameter("view_distance_max", camera.Far);
+                    sh.SetShaderParameter("wind_uv_offset", ocean.windUvOffset);
+                    sh.SetShaderParameter("cascade_uv_scales", ocean.cascadeScales);
+                    sh.SetShaderParameter("cascade_displacements", ocean.GetAllWavesTextures());
+                    sh.SetShaderParameter("uv_scale", ocean.uvScale);
+
+                }
+
+            }
+        }
+    }
+    public override void _Process(double delta)
+    {
+        var camera = GetViewport().GetCamera3D();
+
+        if (!ocean.initialized)
+        {
+            Console.Log("Ocean not yet initialized, initializing");
+            ocean.InitializeSimulation();
+        }
+        ocean.simulate((float)delta);
+
+        if (GetWaveHeight(camera.GlobalPosition, 2) > camera.GlobalPosition.Y)
+        {
+            if (player_is_surfaced)
+            {
+                GoUnderWater();
+            }
+        }
+        else if (!player_is_surfaced)
+        {
+            GoAboveWater();
+        }
+        if (splashParticles != null && Globals.instance.particlesEnabled)
+        {
+            if (splashParticles.ProcessMaterial is ShaderMaterial s)
+            {
+                s.SetShaderParameter("wind_uv_offset", ocean.windUvOffset);
+                s.SetShaderParameter("camera_position_world", camera.GlobalPosition);
+            }
+
+            splashParticles.GlobalPosition = camera.GlobalPosition + (-camera.GlobalTransform.Basis.Z * 300.0f);
+
+            if (splashSubParticles != null)
+            {
+                if (splashSubParticles.ProcessMaterial is ShaderMaterial sh)
+                {
+                    sh.SetShaderParameter("wind_uv_offset", ocean.windUvOffset);
+                    sh.SetShaderParameter("camera_position_world", camera.GlobalPosition);
+                }
+
+            }
+        }
+        if (underwaterParticles != null && Globals.instance.particlesEnabled)
+        {
+            underwaterParticles.GlobalPosition = camera.GlobalPosition;
+        }
+    }
+    // ## Transition to under water environment settings.
+    void GoUnderWater()
+    {
+        player_is_surfaced = false;
+        diveParticles.Visible = true;
+        underwaterPostProc.Visible = Globals.instance.underwaterPostProcessEnabled;
+
+        skyLight.Visible = true;
+        sunLight.LightEnergy = 0.75f;
+
+        // environment.Environment.FogEnabled = false;
+        environment.Environment.VolumetricFogEnabled = true;
+
+        ocean.material.SetShaderParameter("normal_factor", -1.0f);
+        ocean.material.SetShaderParameter("refraction_distance_power", 1.0f);
+
+        if (splashParticles != null && Globals.instance.particlesEnabled)
+        {
+            splashParticles.Restart();
+            splashParticles.Emitting = false;
+
+            splashSubParticles?.Restart();
+        }
+        if (underwaterParticles != null && Globals.instance.particlesEnabled)
+        {
+            underwaterParticles.Emitting = true;
+        }
+        if(Globals.instance.particlesEnabled){
+            diveParticles?.Restart();
+        }
+    }
+    // ## Transition to above water environment settings.
+    void GoAboveWater()
+    {
+        player_is_surfaced = true;
+
+        underwaterPostProc.Visible = false;
+
+        skyLight.Visible = false;
+        diveParticles.Visible = false;
+        sunLight.LightEnergy = 0.5f;
+
+        // environment.Environment.FogEnabled = true;
+        environment.Environment.VolumetricFogEnabled = false;
+
+        ocean.material.SetShaderParameter("normal_factor", 1.0f);
+        ocean.material.SetShaderParameter("refraction_distance_power", 1.55f);
+
+        if (splashParticles != null && Globals.instance.particlesEnabled)
+        {
+            splashParticles.Emitting = true;
+        }
+        if (underwaterParticles != null && Globals.instance.particlesEnabled)
+        {
+            underwaterParticles.Restart();
+            underwaterParticles.Emitting = false;
+        }
+    }
+    // ## Query the wave height at a given location on the horizontal XZ plane. The Y
+    // ## coordinate is ignored, and global position in this context is the position
+    // ## relative to the oceans parent node. Since each pixel encodes both a vertical
+    // ## and horizontal displacement, we need to offset the horizontal displacement
+    // ## and resample a few times to get an accurate height. The number of resample
+    // ## iterations is defined by steps parameter.
+    public float GetWaveHeight(Vector3 global_pos, int max_cascade = 1, int steps = 2)
+    {
+        return ocean.GetWaveHeight(GetViewport().GetCamera3D(), global_pos, max_cascade, steps);
+    }
+    public override string[] _GetConfigurationWarnings(){
+        if(ocean == null){
+            return ["OceanEnvironment requires an Ocean3D to be assigned"];
+        }
+        return [];
+    }
+}
