@@ -1,6 +1,7 @@
 use std::default;
 use std::f32::consts::LN_2;
 
+use godot::classes::notify::NodeNotification;
 use godot::classes::rendering_device::{DataFormat, StorageBufferUsage, TextureUsageBits};
 use godot::global::deg_to_rad;
 use godot::prelude::*;
@@ -40,6 +41,22 @@ struct WaveGenerator {
 }
 #[godot_api]
 impl INode for WaveGenerator {
+    fn on_notification(&mut self, what: NodeNotification){
+        match what {
+            NodeNotification::PREDELETE => {
+                // Possibly not required due to Rust being nice
+                // match self.context {
+                //     Some(x) => {
+                //         x.free();
+                //     }
+                //     None => {}
+                // }
+            }
+            _ => {
+
+            }
+        }
+    }
     fn process(&mut self, delta: f64) {
         // Update one cascade each frame for load balancing
         if self.pass_num_cascades_remaining == 0 {
@@ -47,7 +64,7 @@ impl INode for WaveGenerator {
         }
         self.pass_num_cascades_remaining -= 1;
         let compute_list = self.context.as_mut().expect("Rending context was null").bind_mut().compute_list_begin();
-        self.update(compute_list);
+        self._update(compute_list, self.pass_num_cascades_remaining);
     }
 }
 // #[godot_api]
@@ -56,9 +73,38 @@ impl INode for WaveGenerator {
 // }
 #[godot_api]
 impl WaveGenerator {
+    // ## Begins updating wave cascades based on the provided parameters. To balance stutter,
+    // ## the generator will schedule one cascade update per frame. All cascades from the
+    // ## previous invocation that have not been processed yet will be updated.
+    fn update(&mut self, delta : f64, parameters : Array<Gd<WaveCascadeParameters>>){
+        if parameters.len() == 0{
+            return;
+        }
+        if self.context == None{
+            self.init_gpu(2.max(parameters.len() as u32));
+            // return;
+        } else if self.pass_num_cascades_remaining != 0 {
+            let compute_list = self.context.as_mut().unwrap().bind_mut().compute_list_begin();
+            for i in 0..self.pass_num_cascades_remaining{
+                self._update(compute_list, i)
+            }
+            self.context.as_mut().unwrap().bind_mut().compute_list_end();
+        }
+        // # Update each cascade's parameters that rely on time delta
+        for i in 0..parameters.len(){
+            let mut params_gd = parameters.at(i);
+            let mut params = params_gd.bind_mut();
+            params.time += delta as f32;
+            // # Note: The constants are used to normalize parameters between 0 and 10.
+            params.foam_grow_rate = delta as f32 * params.foam_amount * 7.5;
+            params.foam_decay_rate = delta as f32 * 0.5f32.max((10.0 - params.foam_amount)*1.15);
+        }
+        self.pass_parameters = parameters;
+        self.pass_num_cascades_remaining = self.pass_parameters.len() as u32;
+    }
     #[func]
-    fn update(&mut self, compute_list: i64){
-        let mut _params = self.pass_parameters.at(self.pass_num_cascades_remaining as usize);
+    fn _update(&mut self, compute_list: i64, cascade: u32){
+        let mut _params = self.pass_parameters.at(cascade as usize);
         let mut params = _params.bind_mut();
         // wave spectra update
         if params.should_generate_spectrum {
@@ -66,7 +112,7 @@ impl WaveGenerator {
             let omega = jonswap_peak_angular_frequency(params.get_wind_speed(), params.get_fetch_length() * 1e3);
             self.pipelines[PIPELINE::SpectrumCompute as usize].as_mut().expect("Spectrum compute pipeline was None").call(
                 &[
-                    self.context.to_variant(), 
+                    self.context.as_mut().expect("Context was None").to_variant(), 
                     Variant::from(compute_list), 
                     RenderingContext::create_push_constant(&[
                         params.spectrum_seed.x.to_variant(),
@@ -81,7 +127,7 @@ impl WaveGenerator {
                         params.swell.to_variant(), 
                         params.detail.to_variant(), 
                         params.spread.to_variant(), 
-                        self.pass_num_cascades_remaining.to_variant()
+                        cascade.to_variant()
                     ]).to_variant()
                 ]
             );
@@ -89,17 +135,45 @@ impl WaveGenerator {
         }
         self.pipelines[PIPELINE::SpectrumModulate as usize].as_mut().expect("Spectrum modulate pipeline was None").call(
             &[
-                self.context.to_variant(), 
+                self.context.as_mut().expect("Context was None").to_variant(), 
                 compute_list.to_variant(), 
                 RenderingContext::create_push_constant(&[
                     params.tile_length.x.to_variant(), 
                     params.tile_length.y.to_variant(), 
                     DEPTH.to_variant(), 
                     params.time.to_variant(), 
-                    self.pass_num_cascades_remaining.to_variant()
+                    cascade.to_variant()
                 ]).to_variant()
             ]
         );
+        // --- WAVE SPECTRA INVERSE FOURIER TRANSFORM ---
+        let fft_push_constant = RenderingContext::create_push_constant(&[cascade.to_variant()]);
+        // Note: We need not do a second transpose after computing FFT on rows since rotating the wave by
+        // PI/2 doesn't affect it visually.
+        self.pipelines[PIPELINE::FftCompute as usize].as_mut().expect("FFT Compute pipeline was None").call(&[
+            self.context.as_mut().expect("Context was None").to_variant(), 
+            compute_list.to_variant(), 
+            fft_push_constant.to_variant()
+        ]);
+        self.pipelines[PIPELINE::Transpose as usize].as_mut().expect("Transpose pipeline was None").call(&[
+            self.context.as_mut().expect("Context was None").to_variant(), 
+            compute_list.to_variant(), 
+            fft_push_constant.to_variant()
+        ]);
+        self.context.as_mut().expect("Context was None").bind_mut().compute_list_add_buffer(compute_list);
+        self.pipelines[PIPELINE::FftCompute as usize].as_mut().expect("FFT Compute pipeline was None").call(&[
+            self.context.as_mut().expect("Context was None").to_variant(), 
+            compute_list.to_variant(), 
+            fft_push_constant.to_variant()
+        ]);
+
+        // ## --- DISPLACEMENT/NORMAL MAP UPDATE ---
+        self.pipelines[PIPELINE::FftUnpack as usize].as_mut().expect("FFT Unpack pipeline was None").call(&[
+            self.pass_num_cascades_remaining.to_variant(), 
+            params.whitecap.to_variant(), 
+            params.foam_grow_rate.to_variant(), 
+            params.foam_decay_rate.to_variant()
+        ]);
 
     }
     #[func]
@@ -175,11 +249,8 @@ impl WaveGenerator {
 
             compute_list = context.compute_list_begin();
         }
-        self.pipelines[PIPELINE::FftButterfly as usize].as_mut().expect("").call(&[self.context.to_variant(), Variant::from(compute_list)]);
+        self.pipelines[PIPELINE::FftButterfly as usize].as_mut().expect("").call(&[self.context.as_mut().expect("Context was None").to_variant(), Variant::from(compute_list)]);
         self.context.as_mut().expect("Context was none somehow").bind_mut().compute_list_end();
-        
-        
-
     }
 }
 // Source: https://wikiwaves.org/Ocean-Wave_Spectra#JONSWAP_Spectrum

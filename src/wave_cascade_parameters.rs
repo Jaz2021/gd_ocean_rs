@@ -28,7 +28,7 @@ pub struct WaveCascadeParameters {
     #[export(range = (0.0,2.0))]
     pub whitecap: real,
     #[export(range = (0.0,10.0))]
-    foam_amount: real,
+    pub foam_amount: real,
     pub spectrum_seed: Vector2i,
     pub should_generate_spectrum: bool,
     pub time: real,

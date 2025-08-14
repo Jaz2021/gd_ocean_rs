@@ -97,6 +97,9 @@ impl RenderingContext {
     pub fn compute_list_end(&mut self) {
         self.device.as_mut().unwrap().compute_list_end();
     }
+    pub fn compute_list_add_buffer(&mut self, compute_list: i64){
+        self.device.as_mut().unwrap().compute_list_add_barrier(compute_list);
+    }
     #[func]
     pub fn load_shader(&mut self, path: String) -> Rid {
         if !self.shader_cache.contains_key(path.as_str()){
