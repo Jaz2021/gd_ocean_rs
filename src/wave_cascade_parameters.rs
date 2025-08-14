@@ -8,32 +8,32 @@ pub struct WaveCascadeParameters {
     // #[var] shows it to the code
     // #[func] shows a function to the code
     #[export]
-    tile_length: Vector2,
+    pub tile_length: Vector2,
     #[export(range = (0.0, 2.0))]
-    displacement_scale: real,
+    pub displacement_scale: real,
     #[export(range = (0.0, 2.0))]
-    normal_scale: real,
+    pub normal_scale: real,
     #[export(range = (0.0001, 10.0, or_greater))]
-    wind_speed: real,
+    pub wind_speed: real,
     #[export(range = (-360.0, 360.0))]
-    wind_direction: real,
+    pub wind_direction: real,
     #[export(range = (0.0001, 1000.0, or_greater))]
-    fetch_length: real,
+    pub fetch_length: real,
     #[export(range = (0.0,2.0))]
-    swell: real,
+    pub swell: real,
     #[export(range = (0.0,1.0))]
-    spread: real,
+    pub spread: real,
     #[export(range = (0.0,1.0))]
-    detail: real,
+    pub detail: real,
     #[export(range = (0.0,2.0))]
-    whitecap: real,
+    pub whitecap: real,
     #[export(range = (0.0,10.0))]
     foam_amount: real,
     pub spectrum_seed: Vector2i,
-    should_generate_spectrum: bool,
+    pub should_generate_spectrum: bool,
     pub time: real,
-    foam_grow_rate: real,
-    foam_decay_rate: real,
+    pub foam_grow_rate: real,
+    pub foam_decay_rate: real,
     base: Base<Resource>
 }
 #[godot_api]

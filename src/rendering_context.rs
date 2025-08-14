@@ -1,3 +1,5 @@
+use std::any::{Any, TypeId};
+
 use godot::classes::notify::ObjectNotification;
 use godot::classes::rendering_device::{self, DataFormat, TextureType, TextureUsageBits, UniformType};
 use godot::prelude::*;
@@ -89,12 +91,10 @@ impl RenderingContext {
         self.device.as_mut().unwrap().sync();
         self.needs_sync = false;
     }
-    #[func]
-    fn compute_list_begin(&mut self) -> i64 {
+    pub fn compute_list_begin(&mut self) -> i64 {
         return self.device.as_mut().unwrap().compute_list_begin();
     }
-    #[func]
-    fn compute_list_end(&mut self) {
+    pub fn compute_list_end(&mut self) {
         self.device.as_mut().unwrap().compute_list_end();
     }
     #[func]
@@ -158,39 +158,48 @@ impl RenderingContext {
     }
     // ## Creates a descriptor set. The ordering of the provided descriptors matches the binding ordering
     // ## within the shader.
-    pub fn create_descriptor_set(&mut self, descriptors: Vec<Descriptor>, shader: Rid, descriptor_set_index: u32) -> Rid{
+    // Seemingly the vector of descriptors was unnecessary so it is now a single descriptor instead
+    pub fn create_descriptor_set(&mut self, descriptor:&Descriptor, shader: Rid, descriptor_set_index: u32) -> Rid{
         let mut uniforms: Array<Gd<RdUniform>> = Array::new();
-        for i in 0..descriptors.len() {
-            let mut uniform = RdUniform::new_gd();
-            uniform.set_uniform_type(descriptors[i].descriptor_type);
-            uniform.set_binding(i as i32);
-            uniform.add_id(descriptors[i].rid);
-            uniforms.push(&uniform);
-        }
+        // for i in 0..descriptors.len() {
+        let mut uniform = RdUniform::new_gd();
+        uniform.set_uniform_type(descriptor.descriptor_type);
+        uniform.set_binding(0 as i32);
+        uniform.add_id(descriptor.rid);
+        uniforms.push(&uniform);
+        // }
+        let rid = self.device.as_mut().expect("Rendering device is none").uniform_set_create(&uniforms, shader, descriptor_set_index);
+        self.deletion_queue.push(rid);
+        return rid;
+    }
+    pub fn create_descriptor_set_dual(&mut self, descriptor:&Descriptor, descriptor2: &Descriptor, shader: Rid, descriptor_set_index: u32) -> Rid{
+        let mut uniforms: Array<Gd<RdUniform>> = Array::new();
+        // for i in 0..descriptors.len() {
+        let mut uniform = RdUniform::new_gd();
+        uniform.set_uniform_type(descriptor.descriptor_type);
+        uniform.set_binding(0 as i32);
+        uniform.add_id(descriptor.rid);
+        uniforms.push(&uniform);
+        let mut uniform = RdUniform::new_gd();
+        uniform.set_uniform_type(descriptor2.descriptor_type);
+        uniform.set_binding(1 as i32);
+        uniform.add_id(descriptor2.rid);
+        uniforms.push(&uniform);
+        // }
         let rid = self.device.as_mut().expect("Rendering device is none").uniform_set_create(&uniforms, shader, descriptor_set_index);
         self.deletion_queue.push(rid);
         return rid;
     }
     pub fn create_pipeline(
         &mut self, 
-        block_dimensions: VariantArray, 
-        descriptor_sets: Vec<Descriptor>, 
+        block_dimensions: Vec<i32>, 
+        descriptor_sets: Vec<Rid>, 
         shader: Rid
     ) -> Callable {
         // Create the pipeline using your deletion queue and device
         let pipeline = self.device.as_mut().expect("Rendering device is none").compute_pipeline_create(shader);
         self.deletion_queue.push(pipeline);
         
-        // Convert VariantArray to Vec<i32> for the closure
-        let block_dims: Vec<i32> = (0..block_dimensions.len())
-            .map(|i| block_dimensions.at(i).try_to::<i32>().unwrap_or(0))
-            .collect();
-        
-        // Convert descriptor_sets to Vec<Rid> (assuming Descriptor has a method to get Rid)
-        let desc_sets: Vec<Rid> = descriptor_sets
-            .iter()
-            .map(|desc| desc.rid) // Adjust this method name as needed
-            .collect();
         
         // Create and return the Callable
         Callable::from_local_fn("pipeline_execute", move |args: &[&Variant]| -> Result<Variant, ()> {
@@ -229,14 +238,14 @@ impl RenderingContext {
             let mut device = context_bind.device.as_mut().expect("Rendering device was none");
             
             let sets = if descriptor_set_overwrites.is_empty() {
-                &desc_sets
+                &descriptor_sets
             } else {
                 &descriptor_set_overwrites
             };
             
             // Assertions
             assert!(
-                block_dims.len() == 3 || block_dimensions_overwrite_buffer.is_some(),
+                block_dimensions.len() == 3 || block_dimensions_overwrite_buffer.is_some(),
                 "Must specify block dimensions or specify a dispatch indirect buffer!"
             );
             assert!(sets.len() >= 1, "Must specify at least one descriptor set!");
@@ -264,15 +273,41 @@ impl RenderingContext {
             } else {
                 device.compute_list_dispatch(
                     compute_list,
-                    block_dims[0] as u32,
-                    block_dims[1] as u32,
-                    block_dims[2] as u32,
+                    block_dimensions[0] as u32,
+                    block_dimensions[1] as u32,
+                    block_dimensions[2] as u32,
                 );
             }
             
             // Return void (empty Variant)
             Ok(Variant::nil())
         })
+    }
+    // ## Returns a [PackedFloat32Array] from the provided data, whose size is rounded up to the nearest
+    // ## multiple of 16
+    pub fn create_push_constant(data : &[Variant]) -> PackedByteArray{
+        let packed_size: i32 = (data.len() * 4) as i32;
+        if packed_size <= 128{
+            panic!("Push constant size must be at most 128 bytes!");
+        } 
+
+        let padding = (packed_size as f32 / 16.0).ceil() as i32 * 16 - packed_size;
+        let mut packed_data = PackedByteArray::new();
+        if padding > 0 {
+            packed_data.resize((packed_size + padding) as usize);
+        } else {
+            packed_data.resize(packed_size as usize);
+        }
+        packed_data.fill(0);
+        for i in 0..data.len() {
+            let d = &data[i];
+            if d.type_id() == TypeId::of::<i32>(){
+                _ = packed_data.encode_s32(i * 4, d.to());
+            } else if d.type_id() == TypeId::of::<f32>(){
+                _ = packed_data.encode_float(i * 4, d.to());
+            }
+        }
+        return packed_data
     }
 }
 #[derive(GodotClass)]
@@ -281,7 +316,11 @@ pub struct Descriptor {
     rid: Rid,
     descriptor_type: UniformType
 }
-
+impl Default for Descriptor {
+    fn default() -> Self {
+        Self { rid: Rid::Invalid, descriptor_type: UniformType::STORAGE_BUFFER }
+    }
+}
 struct DeletionQueue {
     queue: Array<Rid>,
 }
