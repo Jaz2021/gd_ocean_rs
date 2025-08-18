@@ -13,14 +13,14 @@ const G : f32 = 9.81;
 const GSQ: f32 = G * G;
 const DEPTH: f32 = 20.0;
 // #[derive(Debug)]
-enum DESCRIPTOR {
+pub(crate) enum DESCRIPTOR {
     Spectrum = 0,
     ButterflyFactors = 1,
     FftBuffer = 2,
     DisplacementMap = 3,
     NormalMap = 4
 }
-enum PIPELINE {
+pub(crate) enum PIPELINE {
     SpectrumCompute = 0,
     SpectrumModulate = 1,
     FftButterfly,
@@ -30,13 +30,13 @@ enum PIPELINE {
 }
 #[derive(GodotClass)]
 #[class(base=Node, init)]
-struct WaveGenerator {
-    map_size: i32,
+pub struct WaveGenerator {
+    pub(crate) map_size: i32,
     context: Option<Gd<RenderingContext>>,
     pipelines: [Option<Callable>; 6],
-    descriptors: [Descriptor; 5],
+    pub(crate) descriptors: [Descriptor; 5],
     pass_num_cascades_remaining: u32,
-    pass_parameters: Array<Gd<WaveCascadeParameters>>,
+    pass_parameters: Array<Option<Gd<WaveCascadeParameters>>>,
     base: Base<Node>
 }
 #[godot_api]
@@ -76,45 +76,64 @@ impl WaveGenerator {
     // ## Begins updating wave cascades based on the provided parameters. To balance stutter,
     // ## the generator will schedule one cascade update per frame. All cascades from the
     // ## previous invocation that have not been processed yet will be updated.
-    fn update(&mut self, delta : f64, parameters : Array<Gd<WaveCascadeParameters>>){
+    pub fn update(&mut self, delta : f64, parameters : Array<Option<Gd<WaveCascadeParameters>>>){
+        godot_print!("Starting wavegenerator update");
         if parameters.len() == 0{
             return;
         }
         if self.context == None{
+            godot_print!("Initializing GPU");
             self.init_gpu(2.max(parameters.len() as u32));
             // return;
         } else if self.pass_num_cascades_remaining != 0 {
+            godot_print!("Pass cascade: {}", self.pass_num_cascades_remaining);
             let compute_list = self.context.as_mut().unwrap().bind_mut().compute_list_begin();
             for i in 0..self.pass_num_cascades_remaining{
                 self._update(compute_list, i)
             }
             self.context.as_mut().unwrap().bind_mut().compute_list_end();
         }
+        godot_print!("Updating cascade parameters");
         // # Update each cascade's parameters that rely on time delta
         for i in 0..parameters.len(){
-            let mut params_gd = parameters.at(i);
-            let mut params = params_gd.bind_mut();
-            params.time += delta as f32;
-            // # Note: The constants are used to normalize parameters between 0 and 10.
-            params.foam_grow_rate = delta as f32 * params.foam_amount * 7.5;
-            params.foam_decay_rate = delta as f32 * 0.5f32.max((10.0 - params.foam_amount)*1.15);
+            match parameters.at(i) {
+                Some(mut params_gd) => {
+                    let mut params = params_gd.bind_mut();
+                    params.time += delta as f32;
+                    // # Note: The constants are used to normalize parameters between 0 and 10.
+                    params.foam_grow_rate = delta as f32 * params.foam_amount * 7.5;
+                    params.foam_decay_rate = delta as f32 * 0.5f32.max((10.0 - params.foam_amount)*1.15);
+                }
+                None => {
+                    // godot_error!("Parameter {i} is null");
+                    return;
+                }
+            }
+            
         }
         self.pass_parameters = parameters;
         self.pass_num_cascades_remaining = self.pass_parameters.len() as u32;
     }
     #[func]
     fn _update(&mut self, compute_list: i64, cascade: u32){
-        let mut _params = self.pass_parameters.at(cascade as usize);
+        let mut _params;
+        match self.pass_parameters.at(cascade as usize) {
+            Some(x ) => {
+                _params = x;
+            }
+            None => {
+                return;
+            }
+        }
+        godot_print!("Inside _update");
+        let mut _params = self.pass_parameters.at(cascade as usize).unwrap();
         let mut params = _params.bind_mut();
         // wave spectra update
         if params.should_generate_spectrum {
+            godot_print!("Generating spectrum");
             let alpha = jonswap_alpha(params.get_wind_speed(), params.get_fetch_length() * 1e3);
             let omega = jonswap_peak_angular_frequency(params.get_wind_speed(), params.get_fetch_length() * 1e3);
-            self.pipelines[PIPELINE::SpectrumCompute as usize].as_mut().expect("Spectrum compute pipeline was None").call(
-                &[
-                    self.context.as_mut().expect("Context was None").to_variant(), 
-                    Variant::from(compute_list), 
-                    RenderingContext::create_push_constant(&[
+            let push_constant = RenderingContext::create_push_constant(&[
                         params.spectrum_seed.x.to_variant(),
                         params.spectrum_seed.y.to_variant(),
                         params.tile_length.x.to_variant(),
@@ -128,11 +147,19 @@ impl WaveGenerator {
                         params.detail.to_variant(), 
                         params.spread.to_variant(), 
                         cascade.to_variant()
-                    ]).to_variant()
+            ]);
+            godot_print!("Spectrum compute pipeline");
+            self.pipelines[PIPELINE::SpectrumCompute as usize].as_mut().expect("Spectrum compute pipeline was None").call(
+                &[
+                    self.context.as_mut().expect("Context was None").to_variant(), 
+                    Variant::from(compute_list), 
+                    push_constant.to_variant(),
                 ]
             );
             params.should_generate_spectrum = false;
+            godot_print!("Finished generating spectrum");
         }
+        godot_print!("modulating spectrum");
         self.pipelines[PIPELINE::SpectrumModulate as usize].as_mut().expect("Spectrum modulate pipeline was None").call(
             &[
                 self.context.as_mut().expect("Context was None").to_variant(), 
@@ -146,7 +173,9 @@ impl WaveGenerator {
                 ]).to_variant()
             ]
         );
+        godot_print!("Finished modulating spectrum");
         // --- WAVE SPECTRA INVERSE FOURIER TRANSFORM ---
+        godot_print!("Began IFT");
         let fft_push_constant = RenderingContext::create_push_constant(&[cascade.to_variant()]);
         // Note: We need not do a second transpose after computing FFT on rows since rotating the wave by
         // PI/2 doesn't affect it visually.
@@ -166,6 +195,7 @@ impl WaveGenerator {
             compute_list.to_variant(), 
             fft_push_constant.to_variant()
         ]);
+        godot_print!("Finished IFT");
 
         // ## --- DISPLACEMENT/NORMAL MAP UPDATE ---
         self.pipelines[PIPELINE::FftUnpack as usize].as_mut().expect("FFT Unpack pipeline was None").call(&[
@@ -177,7 +207,7 @@ impl WaveGenerator {
 
     }
     #[func]
-    fn init_gpu(&mut self, num_cascades: u32){
+    pub(crate) fn init_gpu(&mut self, num_cascades: u32){
         // Device/Shader Creation
         if self.context == None {
             // self.context = Some(RenderingContext::new_gd());
@@ -185,16 +215,16 @@ impl WaveGenerator {
             temp_context.bind_mut().initialize(RenderingServer::singleton().get_rendering_device());
             self.context = Some(temp_context);
         }
-        let compute_list;
+        let compute_list: i64;
         {
             let mut context = self.context.as_mut().expect("Context was None").bind_mut();
-            let spectrum_compute_shader = context.load_shader("../shaders/compute/spectrum_compute.glsl".to_string());
-            let fft_butterfly_shader = context.load_shader("../shaders/compute/fft_butterfly.glsl".to_string());
-            let spectrum_modulate_shader = context.load_shader("../shaders/compute/spectrum_modulate.glsl".to_string());
-            let fft_compute_shader = context.load_shader("../shaders/compute/fft_compute.glsl".to_string());
-            let transpose_shader = context.load_shader("../shaders/compute/transpose.glsl".to_string());
-            let fft_unpack_shader = context.load_shader("../shaders/compute/fft_unpack.glsl".to_string());
-            let dims: Vector2i = Vector2i { x: self.map_size, y: self.map_size };
+            let spectrum_compute_shader = context.load_shader("res://addons/gd_ocean/shaders/compute/spectrum_compute.glsl".to_string());
+            let fft_butterfly_shader = context.load_shader("res://addons/gd_ocean/shaders/compute/fft_butterfly.glsl".to_string());
+            let spectrum_modulate_shader = context.load_shader("res://addons/gd_ocean/shaders/compute/spectrum_modulate.glsl".to_string());
+            let fft_compute_shader = context.load_shader("res://addons/gd_ocean/shaders/compute/fft_compute.glsl".to_string());
+            let transpose_shader = context.load_shader("res://addons/gd_ocean/shaders/compute/transpose.glsl".to_string());
+            let fft_unpack_shader = context.load_shader("res://addons/gd_ocean/shaders/compute/fft_unpack.glsl".to_string());
+            let dims: Vector2i = Vector2i { x: self.map_size as i32, y: self.map_size as i32 };
             let num_fft_stages : i32 = ((self.map_size as f32).ln() / LN_2).floor() as i32;
 
             // Prepare Descriptors:
@@ -205,14 +235,18 @@ impl WaveGenerator {
                 RdTextureView::new_gd(), 
                 Array::new()
             );
+            godot_print!("A");
+            //# Size: (#FFT stages * map size * sizeof(vec4))
+            let mut data = PackedByteArray::new();
             self.descriptors[DESCRIPTOR::ButterflyFactors as usize] = context.create_storage_buffer(
                 (num_fft_stages * self.map_size * 4 * 4) as usize, 
-                PackedByteArray::new(), 
+                data, 
                 StorageBufferUsage::DISPATCH_INDIRECT
             );
+            let mut data_2 = PackedByteArray::new();
             self.descriptors[DESCRIPTOR::FftBuffer as usize] = context.create_storage_buffer(
-                (num_cascades as i32 * self.map_size * self.map_size * 4 * 2 * 2 * 4) as usize, 
-                PackedByteArray::new(), 
+                (num_cascades as u32 * self.map_size as u32 * self.map_size as u32 * 4 * 2 * 2 * 4) as usize, 
+                data_2, 
                 StorageBufferUsage::DISPATCH_INDIRECT
             );
             self.descriptors[DESCRIPTOR::DisplacementMap as usize] = context.create_texture(
@@ -231,7 +265,7 @@ impl WaveGenerator {
                 RdTextureView::new_gd(), 
                 Array::new()
             );
-            // let spectrum_vec = 
+
 
             let spectrum_set = context.create_descriptor_set(&self.descriptors[DESCRIPTOR::Spectrum as usize], spectrum_compute_shader, 0);
             let fft_butterfly_set = context.create_descriptor_set(&self.descriptors[DESCRIPTOR::ButterflyFactors as usize], fft_butterfly_shader, 0);

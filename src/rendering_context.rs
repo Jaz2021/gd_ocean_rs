@@ -1,27 +1,28 @@
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 
 use godot::classes::notify::ObjectNotification;
 use godot::classes::rendering_device::{self, DataFormat, TextureType, TextureUsageBits, UniformType};
 use godot::prelude::*;
-use godot::classes::{RdShaderFile, RdTextureFormat, RdTextureView, RdUniform, RenderingDevice, RenderingServer, Resource, ShaderMaterial};
+use godot::classes::{RdShaderFile, RdShaderSpirv, RdTextureFormat, RdTextureView, RdUniform, RenderingDevice, RenderingServer, Resource, ShaderMaterial};
 #[derive(GodotClass)]
 #[class(base=Resource)]
 pub struct RenderingContext {
     device: Option<Gd<RenderingDevice>>,
     deletion_queue: DeletionQueue,
-    shader_cache: Dictionary,
+    shader_cache: HashMap<String, Rid>,
     needs_sync: bool,
     base: Base<Resource>
 }
 #[godot_api]
 impl IResource for RenderingContext {
     fn init(base: Base<Resource>) -> Self {
-        godot_print!("Hello world!");
+        godot_print!("Rendering context initialized");
         // let device = RenderingServer::singleton().create_local_rendering_device();
         Self {
             device: None,
             deletion_queue: DeletionQueue { queue: Array::new() },
-            shader_cache: Dictionary::new(),
+            shader_cache: HashMap::new(),
             needs_sync: false,
             base
         }
@@ -103,22 +104,23 @@ impl RenderingContext {
     #[func]
     pub fn load_shader(&mut self, path: String) -> Rid {
         if !self.shader_cache.contains_key(path.as_str()){
-            let shader_file = load::<RdShaderFile>(path.as_str());
-            let shader_spirv = shader_file.get_spirv().expect(format!("{path} was not a valid shader file, get_spirv failed").as_str());
-            self.deletion_queue.push(shader_spirv.get_rid());
-            self.shader_cache.set(path.as_str(), shader_spirv.get_rid());
+            let shader_spirv = load::<RdShaderFile>(path.as_str()).get_spirv().expect(format!("{path} was not a valid shader file, get_spirv failed").as_str());
+            let rid = self.device.as_mut().unwrap().shader_create_from_spirv(&shader_spirv);
+            if(rid == Rid::Invalid){
+                godot_error!("Shader at {path} did not create an RID");
+            }
+            self.deletion_queue.push(rid);
+            self.shader_cache.insert(path.clone(), rid);
         }
-        return self.shader_cache.get(path.as_str()).expect("Path was not a valid shaderMaterial or something else went wrong not sure").to();
+        return self.shader_cache[path.as_str()];
+
+        // return self.shader_cache.get(path.as_str()).expect("Path was not a valid shaderMaterial or something else went wrong not sure");
     }
     // #[func]
     pub fn create_storage_buffer(&mut self, mut size: usize, mut data: PackedByteArray, usage: rendering_device::StorageBufferUsage) -> Descriptor {
         size = size.max(16);
         if size > data.len() {
-            // let mut padding = PackedByteArray::new();
-            // padding.resize(size - data.len());
-            for _ in 0..(size - data.len()) {
-                data.push(0u8);
-            }
+            data.resize(size); // Resize already sets them to 0
         }
         let mut buffer = self.device.as_mut().expect("Rendering context device is none").storage_buffer_create_ex((size as u32).max(data.len() as u32));
         buffer = buffer.data(&data);
@@ -130,9 +132,7 @@ impl RenderingContext {
     pub fn create_uniform_buffer(&mut self, mut size: usize, mut data: PackedByteArray) -> Descriptor {
         size = size.max(16);
         if size > data.len() {
-            for _ in 0..(size - data.len()) {
-                data.push(0u8);
-            }
+            data.resize(size);
         }
         let mut buffer = self.device.as_mut().expect("Rendering device is none").uniform_buffer_create_ex(size.max(data.len()) as u32);
         buffer = buffer.data(&data);
@@ -206,6 +206,7 @@ impl RenderingContext {
         
         // Create and return the Callable
         Callable::from_local_fn("pipeline_execute", move |args: &[&Variant]| -> Result<Variant, ()> {
+            godot_print!("Inside pipeline");
             // Extract arguments from the Variant array
             let mut context = args.get(0)
                 .and_then(|v| v.try_to::<Gd<RenderingContext>>().ok())
@@ -255,6 +256,7 @@ impl RenderingContext {
             
             // Bind pipeline and set push constants
             device.compute_list_bind_compute_pipeline(compute_list, pipeline);
+            godot_print!("Setting push constant");
             device.compute_list_set_push_constant(
                 compute_list, 
                 &push_constant, 
@@ -290,9 +292,11 @@ impl RenderingContext {
     // ## multiple of 16
     pub fn create_push_constant(data : &[Variant]) -> PackedByteArray{
         let packed_size: i32 = (data.len() * 4) as i32;
-        if packed_size <= 128{
+        if packed_size > 128{
             panic!("Push constant size must be at most 128 bytes!");
-        } 
+        } else {
+            godot_print!("Creating push constant with size {packed_size}");
+        }
 
         let padding = (packed_size as f32 / 16.0).ceil() as i32 * 16 - packed_size;
         let mut packed_data = PackedByteArray::new();
@@ -316,8 +320,8 @@ impl RenderingContext {
 #[derive(GodotClass)]
 #[class(no_init)]
 pub struct Descriptor {
-    rid: Rid,
-    descriptor_type: UniformType
+    pub rid: Rid,
+    pub descriptor_type: UniformType
 }
 impl Default for Descriptor {
     fn default() -> Self {

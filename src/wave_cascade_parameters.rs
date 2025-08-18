@@ -2,7 +2,7 @@ use godot::classes::class_macros::registry::signal;
 use godot::prelude::*;
 use godot::classes::Resource;
 #[derive(GodotClass)]
-#[class(base=Resource)]
+#[class(base=Resource, tool)]
 pub struct WaveCascadeParameters {
     // So #[export] shows it to the editor
     // #[var] shows it to the code
@@ -39,7 +39,7 @@ pub struct WaveCascadeParameters {
 #[godot_api]
 impl IResource for WaveCascadeParameters {
     fn init(base: Base<Resource>) -> Self {
-        godot_print!("Hello world!");
+        godot_print!("Wave cascade parameters initialized");
         Self {
             tile_length: Vector2::new(50.0, 50.0),
             displacement_scale: 1.0,
