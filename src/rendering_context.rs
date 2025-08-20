@@ -17,7 +17,7 @@ pub struct RenderingContext {
 #[godot_api]
 impl IResource for RenderingContext {
     fn init(base: Base<Resource>) -> Self {
-        godot_print!("Rendering context initialized");
+        // godot_print!("Rendering context initialized");
         // let device = RenderingServer::singleton().create_local_rendering_device();
         Self {
             device: None,
@@ -97,6 +97,8 @@ impl RenderingContext {
     }
     pub fn compute_list_end(&mut self) {
         self.device.as_mut().unwrap().compute_list_end();
+        self.sync();
+        self.submit();
     }
     pub fn compute_list_add_buffer(&mut self, compute_list: i64){
         self.device.as_mut().unwrap().compute_list_add_barrier(compute_list);
@@ -116,19 +118,33 @@ impl RenderingContext {
 
         // return self.shader_cache.get(path.as_str()).expect("Path was not a valid shaderMaterial or something else went wrong not sure");
     }
-    // #[func]
-    pub fn create_storage_buffer(&mut self, mut size: usize, mut data: PackedByteArray, usage: rendering_device::StorageBufferUsage) -> Descriptor {
-        size = size.max(16);
-        if size > data.len() {
-            data.resize(size); // Resize already sets them to 0
-        }
-        let mut buffer = self.device.as_mut().expect("Rendering context device is none").storage_buffer_create_ex((size as u32).max(data.len() as u32));
+    pub fn create_storage_buffer(&mut self, size: usize, usage: rendering_device::StorageBufferUsage) -> Descriptor {
+        let actual_size = size.max(16);
+        let mut data = PackedByteArray::new();
+        data.resize(actual_size);
+        data.fill(0); // Initialize with zeros
+        
+        let mut buffer = self.device.as_mut().expect("Rendering context device is none")
+            .storage_buffer_create_ex(actual_size as u32);
         buffer = buffer.data(&data);
         buffer = buffer.usage(usage);
         let rid = buffer.done();
         self.deletion_queue.push(rid);
         Descriptor { rid: rid, descriptor_type: UniformType::STORAGE_BUFFER }
     }
+    // #[func]
+    // pub fn create_storage_buffer(&mut self, mut size: usize, mut data: PackedByteArray, usage: rendering_device::StorageBufferUsage) -> Descriptor {
+    //     size = size.max(16);
+    //     if size > data.len() {
+    //         data.resize(size); // Resize already sets them to 0
+    //     }
+    //     let mut buffer = self.device.as_mut().expect("Rendering context device is none").storage_buffer_create_ex((size as u32).max(data.len() as u32));
+    //     buffer = buffer.data(&data);
+    //     buffer = buffer.usage(usage);
+    //     let rid = buffer.done();
+    //     self.deletion_queue.push(rid);
+    //     Descriptor { rid: rid, descriptor_type: UniformType::STORAGE_BUFFER }
+    // }
     pub fn create_uniform_buffer(&mut self, mut size: usize, mut data: PackedByteArray) -> Descriptor {
         size = size.max(16);
         if size > data.len() {
@@ -146,17 +162,19 @@ impl RenderingContext {
             // panic!("Num layers in create_texture less than 1");
             godot_print!("Num layers in create_texture was set to 0, should be at least 1. Defaulted to 1");
         }
+        // godot_print!("Creating texture");
         let mut texture_format = RdTextureFormat::new_gd();
         texture_format.set_array_layers(num_layers);
         texture_format.set_format(format);
         texture_format.set_width(dimensions.x as u32);
         texture_format.set_height(dimensions.y as u32);
-        texture_format.set_texture_type(TextureType::TYPE_2D);
-        texture_format.set_usage_bits(usage); 
+        texture_format.set_texture_type(TextureType::TYPE_2D_ARRAY);
+        texture_format.set_usage_bits(usage);
         // Default RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
         let texture = self.device.as_mut().expect("Rendering device is none").texture_create_ex(&texture_format, &view);
         let rid = texture.data(&data).done();
         self.deletion_queue.push(rid);
+        // godot_print!("Finished creating texture");
         Descriptor { rid: rid, descriptor_type: UniformType::IMAGE }
     }
     // ## Creates a descriptor set. The ordering of the provided descriptors matches the binding ordering
@@ -206,15 +224,19 @@ impl RenderingContext {
         
         // Create and return the Callable
         Callable::from_local_fn("pipeline_execute", move |args: &[&Variant]| -> Result<Variant, ()> {
-            godot_print!("Inside pipeline");
+            // godot_print!("Inside pipeline");
             // Extract arguments from the Variant array
-            let mut context = args.get(0)
-                .and_then(|v| v.try_to::<Gd<RenderingContext>>().ok())
-                .expect("First argument must be RenderingContext");
-            
-            let compute_list = args.get(1)
-                .and_then(|v| v.try_to::<i64>().ok())
-                .unwrap_or(0);
+            let arg_one = args.get(0).unwrap();
+            // godot_print!("Arg one type: {:?}", arg_one.get_type());
+            let mut context: Gd<RenderingContext> = arg_one.try_to().expect("First argument must be a Gd<RenderingContext>");
+            // let mut context = args.get(0)
+            //     .and_then(|v| v.try_to::<Gd<RenderingContext>>().ok())
+            //     .expect("First argument must be RenderingContext");
+            let arg_two = args.get(1).unwrap();
+            let compute_list = arg_two.try_to().expect("Arg two is an i64");
+            // let compute_list = args.get(1)
+            //     .and_then(|v| v.try_to::<i64>().ok())
+            //     .unwrap_or(0);
             
             let push_constant = args.get(2)
                 .and_then(|v| v.try_to::<PackedByteArray>().ok())
@@ -256,7 +278,7 @@ impl RenderingContext {
             
             // Bind pipeline and set push constants
             device.compute_list_bind_compute_pipeline(compute_list, pipeline);
-            godot_print!("Setting push constant");
+            // godot_print!("Setting push constant");
             device.compute_list_set_push_constant(
                 compute_list, 
                 &push_constant, 
@@ -295,7 +317,7 @@ impl RenderingContext {
         if packed_size > 128{
             panic!("Push constant size must be at most 128 bytes!");
         } else {
-            godot_print!("Creating push constant with size {packed_size}");
+            // godot_print!("Creating push constant with size {packed_size}");
         }
 
         let padding = (packed_size as f32 / 16.0).ceil() as i32 * 16 - packed_size;
@@ -338,7 +360,7 @@ impl DeletionQueue {
     pub fn flush(&mut self, device: &mut Gd<RenderingDevice>){
         // work backwards in order of allocation when freeing resources
         let size = self.queue.len();
-        for i in size - 1..0{
+        for i in (0..size).rev(){
             match self.queue.get(i){
                 Some(x) => {
                     if x.is_valid() {

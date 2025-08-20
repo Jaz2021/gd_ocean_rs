@@ -6,9 +6,9 @@ use godot::prelude::*;
 use godot::classes::{Engine, RandomNumberGenerator, RenderingServer, Resource, ShaderMaterial, Texture2DArrayRd, Time};
 use crate::wave_cascade_parameters::WaveCascadeParameters;
 use crate::wave_generator::{WaveGenerator, DESCRIPTOR};
-
 #[derive(GodotClass)]
 #[class(tool, base=Node)]
+
 struct Ocean {
     #[export]
     water_material: Option<Gd<ShaderMaterial>>,
@@ -20,20 +20,26 @@ struct Ocean {
     #[export(enum = (_128x128 = 128, _256x256 = 256, _512x512 = 512, _1024x1024 = 1024))]
     #[var(set = set_map_size, get = get_map_size)]
     map_size: i32,
-    #[export(range = (0.0, 60.0, 1.0))]
+    #[export(range = (0.0, 120.0, 1.0))]
     #[var(set = set_updates_per_second, get = get_updates_per_second)]
     updates_per_second: real,
-    next_update_time: real,
+    update_time: real,
     wave_generator: Option<Gd<WaveGenerator>>,
     rng: Gd<RandomNumberGenerator>,
+    #[var]
+    internal_time: f64,
+    #[var]
+    external_time: f64,
+    #[export]
+    sync_time: f32, // Minimum difference between external and internal time to sync the two
     time: f32,
     displacement_maps: Gd<Texture2DArrayRd>,
     normal_maps: Gd<Texture2DArrayRd>,
     params_null: bool,
+
     initialized: bool,
     base: Base<Node>
 }
-
 #[godot_api]
 impl INode for Ocean {
     fn get_configuration_warnings(&self) -> PackedStringArray {
@@ -49,72 +55,69 @@ impl INode for Ocean {
         }
         return s;
     }
-    
     fn init(base: Base<Node>) -> Self {
         let mut rng = RandomNumberGenerator::new_gd();
-        rng.set_seed(1234); // Use same seed as original for consistency
-        
+        // rng.set_seed(Time::singleton().get_unix_time_from_system().round() as u64); // Set the seed randomly upon initialize
         Ocean {
-            water_material: None,
-            spray_material: None,
-            parameters: Array::new(),
-            map_size: 1024,
-            updates_per_second: 50.0,
-            next_update_time: 0.0,
-            wave_generator: None,
-            rng: rng,
+            water_material:None,
+            spray_material:None,
+            parameters:Array::new(),
+            map_size:1024,
+            updates_per_second:60.0,
+            update_time:1.0/60.0,
+            wave_generator:None,
+            rng:rng,
+            internal_time:0.0,
+            external_time:0.0,
+            sync_time: 0.2, 
             time: 0.0,
-            displacement_maps: Texture2DArrayRd::new_gd(),
-            normal_maps: Texture2DArrayRd::new_gd(),
-            initialized: false,
+            displacement_maps:Texture2DArrayRd::new_gd(),
+            normal_maps:Texture2DArrayRd::new_gd(),
+            initialized:false,
             params_null: true,
             base,
         }
     }
-    
-    fn process(&mut self, delta: f64) {
-        // Update waves like the original - check if it's time to update
-        if self.updates_per_second == 0.0 || self.time >= self.next_update_time {
-            let target_update_delta = 1.0 / (self.updates_per_second + 1e-10);
-            let update_delta = if self.updates_per_second == 0.0 { 
-                delta as f32 
-            } else { 
-                target_update_delta + (self.time - self.next_update_time) 
-            };
-            self.next_update_time = self.time + target_update_delta;
-            self._update_water(update_delta as f64);
-        }
+    fn process(&mut self, delta: f64){
+        // Update the aves every update_time
         self.time += delta as f32;
+        self.internal_time += delta;
+        self.external_time += delta;
+        if (self.external_time - self.internal_time).abs() > self.sync_time as f64 {
+            self.time += (self.external_time - self.internal_time) as f32;
+            self.internal_time = self.external_time;
+        }
+        if self.updates_per_second == 0.0 || self.time > self.update_time {
+            self.time -= self.update_time;
+            // godot_print!("Starting water update");
+            self._update_water(self.time as f64);
+
+        }
     }
-    
-    fn ready(&mut self) {
+    fn ready(&mut self){
         if Engine::singleton().is_editor_hint() {
             self.initialize_random();
         }
     }
 }
-
 #[godot_api]
 impl Ocean {
     #[func]
-    pub fn initialize_random(&mut self) {
+    pub fn initialize_random(&mut self){
         self.rng.set_seed(Time::singleton().get_unix_time_from_system().round() as u64);
         self.initialized = true;
     }
-    
     #[func]
-    pub fn initialize_set(&mut self, seed: u64) {
+    pub fn initialize_set(&mut self, seed: u64){
         self.rng.set_seed(seed);
         self.initialized = true;
     }
-    
     #[func]
     pub fn get_updates_per_second(&self) -> f32 {
         return self.updates_per_second;
     }
-    
     #[func]
-    pub fn set_wave_generator(&mut self, gen: Option<Gd<WaveGenerator>>) {
+    pub fn set_wave_generator(&mut self, gen: Option<Gd<WaveGenerator>>){
         if self.wave_generator != None {
             self.wave_generator.as_mut().unwrap().queue_free();
         }
@@ -125,33 +128,27 @@ impl Ocean {
             mutself.add_child(&gen.clone().unwrap());
         }
     }
-    
     #[func]
-    pub fn set_updates_per_second(&mut self, value: real) {
-        // Update next_update_time like the original
-        self.next_update_time = self.next_update_time - (1.0/(self.updates_per_second + 1e-10) - 1.0/(value + 1e-10));
+    pub fn set_updates_per_second(&mut self, value: real){
         self.updates_per_second = value;
-        godot_print!("Updates per second set to {}", self.updates_per_second);
+        self.update_time = 1.0 / value;
+        godot_print!("Update time is {}", self.update_time);
     }
-    
     #[func]
-    pub fn set_map_size(&mut self, value: i32) {
+    pub fn set_map_size(&mut self, value : i32) {
         self.map_size = value;
         self.setup_wave_generator();
     }
-    
     #[func]
     pub fn get_map_size(&self) -> i32 {
         return self.map_size;
     }
-    
     #[func]
-    pub fn get_parameters(&self) -> Array<Option<Gd<WaveCascadeParameters>>> {
+    pub fn get_parameters(&self) -> Array<Option<Gd<WaveCascadeParameters>>>{
         return self.parameters.clone();
     }
-    
     #[func]
-    pub fn set_parameters(&mut self, val: Array<Option<Gd<WaveCascadeParameters>>>) {
+    pub fn set_parameters(&mut self, val : Array<Option<Gd<WaveCascadeParameters>>>){
         let new_size = val.len();
         let mut rng = RandomNumberGenerator::new_gd();
         for i in 0..new_size {
@@ -160,58 +157,57 @@ impl Ocean {
                     let mut param = x.bind_mut();
                     param.spectrum_seed = Vector2i { x: rng.randi_range(-10000, 10000), y: rng.randi_range(-10000, 10000) };
                     param.time = 120.0 + f32::consts::PI * (i as f32);
-                    param.should_generate_spectrum = true; // Ensure spectrum generation
                     param.signals().scale_changed().connect_other(self, Ocean::scale_changed);
                     self.params_null = false;
+                    for i in 0..val.len() {
+                        if val.at(i) == None {
+                            // godot_print!("Parameter {i} is none");
+                            self.params_null = true;
+                        }
+                    }
                 }
                 None => {
+                    // val.set(i, WaveCascadeParameters::new_gd()); // Not sure how to set this up. That's for future me to figure out ig
                     self.params_null = true;
                 }
+                
             }
         }
-        
-        // Check if any parameters are null
-        for i in 0..val.len() {
-            if val.at(i) == None {
-                self.params_null = true;
-                break;
-            }
-        }
-        
         self.parameters = val;
         self.setup_wave_generator();
         self.update_scales_uniform();
     }
-    
-    fn _update_water(&mut self, delta: f64) {
+    fn _update_water(&mut self, time: f64){
         if self.wave_generator == None {
             self.setup_wave_generator();
-        }
-        // Don't return early like the original - continue with update if generator exists
-        if self.wave_generator != None {
-            self.wave_generator.as_mut().unwrap().bind_mut().update(delta, self.parameters.clone());
-        }
-    }
-    
-    pub fn scale_changed(&mut self) {
-        // Implementation for scale change handling
-    }
-    
-    fn setup_wave_generator(&mut self) {
-        if self.parameters.len() == 0 {
-            return;
-        } else if self.params_null {
-            return;
-        }
-        
-        // Ensure all parameters have should_generate_spectrum = true like the original
-        for i in 0..self.parameters.len() {
-            if let Some(mut param) = self.parameters.at(i) {
-                param.bind_mut().should_generate_spectrum = true;
+            if self.wave_generator == None {
+                return; // Only return if setup actually failed
             }
         }
-        
+        // Continue with update
+        self.wave_generator.as_mut().unwrap().bind_mut().update(time, self.parameters.clone());
+    }
+    // fn _update_water(&mut self, time: f64){
+    //     if self.wave_generator == None {
+    //         // godot_print!("Setting up wave generator");
+    //         self.setup_wave_generator();
+    //         return; // Returning so that if we get a failed setup, we don't have issues
+    //     }
+    //     // godot_print!("Wave generator is set up, updating");
+    //     self.wave_generator.as_mut().unwrap().bind_mut().update(time, self.parameters.clone());
+    // }
+    pub fn scale_changed(&mut self){
+
+    }
+    fn setup_wave_generator(&mut self){
+        if self.parameters.len() == 0 {
+            return;
+        } else if self.params_null{
+            return;
+        }
+        // godot_print!("Creating new waveGen");
         let mut wave_gen_gd = WaveGenerator::new_alloc();
+        // godot_print!("Wavegen created");
         let do_steps = || -> Result<(), Error> {
             {
                 let mut wave_gen = wave_gen_gd.bind_mut();
@@ -226,19 +222,19 @@ impl Ocean {
             self.set_wave_generator(Some(wave_gen_gd.clone()));
             Ok(())
         }();
-        
         match do_steps {
-            Ok(_) => {
-                // Success
+            Ok(x) => {
+                // godot_print!("Steps done successfully");
             }
             Err(e) => {
+                // godot_print!("Failed from do_steps");
                 wave_gen_gd.free();
                 godot_error!("ocean.rs, line 184\n{}", e);
             }
+
         }
     }
-    
-    fn update_scales_uniform(&mut self) {
+    fn update_scales_uniform(&mut self){
         if self.parameters.len() == 0 || self.params_null {
             return;
         }
@@ -247,12 +243,7 @@ impl Ocean {
         for i in 0..self.parameters.len() {
             let param = self.parameters.at(i).unwrap();
             let uv_scale = Vector2::ONE / param.bind().get_tile_length();
-            map_scales[i] = Vector4 { 
-                x: uv_scale.x, 
-                y: uv_scale.y, 
-                z: param.bind().get_displacement_scale(), 
-                w: param.bind().get_normal_scale() 
-            };
+            map_scales[i] = Vector4 { x: uv_scale.x, y: uv_scale.y, z: param.bind().get_displacement_scale(), w: param.bind().get_normal_scale() };
         }
         if self.water_material == None || self.spray_material == None {
             return;

@@ -39,7 +39,7 @@ pub struct WaveCascadeParameters {
 #[godot_api]
 impl IResource for WaveCascadeParameters {
     fn init(base: Base<Resource>) -> Self {
-        godot_print!("Wave cascade parameters initialized");
+        // godot_print!("Wave cascade parameters initialized");
         Self {
             tile_length: Vector2::new(50.0, 50.0),
             displacement_scale: 1.0,
